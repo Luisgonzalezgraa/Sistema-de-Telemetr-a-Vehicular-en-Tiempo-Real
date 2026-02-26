@@ -20,7 +20,14 @@ services:
       - simulator
       - db
     restart: unless-stopped
-
+  dashboard:
+    build: ./dashboard
+    container_name: telemetry_dashboard
+    depends_on:
+      - db
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
   db:
     image: timescale/timescaledb:latest-pg14
     container_name: telemetry_db

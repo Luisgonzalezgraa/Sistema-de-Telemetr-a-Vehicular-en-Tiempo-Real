@@ -6,7 +6,6 @@ import psycopg2
 from psycopg2 import OperationalError
 
 INPUT_PATH = "/out/telemetry.jsonl"
-EVENTS_PATH = "/out/events.jsonl"
 
 print("[consumer] Starting...")
 
@@ -14,8 +13,8 @@ print("[consumer] Starting...")
 print("[consumer] Waiting for telemetry file...")
 while not os.path.exists(INPUT_PATH):
     time.sleep(1)
-
 print("[consumer] Telemetry file found ✅")
+
 
 # 2) Conectar a DB con reintento
 def connect_with_retry():
@@ -25,7 +24,7 @@ def connect_with_retry():
                 host="db",
                 database="telemetry",
                 user="telemetry",
-                password="telemetry"
+                password="telemetry",
             )
             print("[consumer] Connected to DB ✅")
             return conn
@@ -33,10 +32,11 @@ def connect_with_retry():
             print(f"[consumer] DB not ready yet... retry in 2s. ({e})")
             time.sleep(2)
 
+
 conn = connect_with_retry()
 cursor = conn.cursor()
 
-# 3) Crear tabla si no existe
+# 3) Crear tablas si no existen
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS telemetry (
     ts TIMESTAMPTZ,
@@ -50,10 +50,38 @@ CREATE TABLE IF NOT EXISTS telemetry (
     g_lon FLOAT
 );
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS events (
+    ts TIMESTAMPTZ,
+    vehicle_id TEXT,
+    event_type TEXT
+);
+""")
+
 conn.commit()
+print("[consumer] Tables ready ✅")
 
-print("[consumer] Table ready ✅")
+# 4) (Opcional) Convertir a hypertables si Timescale está disponible
+#    Si ya las creaste antes, esto simplemente no hará nada.
+try:
+    cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+    conn.commit()
 
+    cursor.execute("SELECT create_hypertable('telemetry', 'ts', if_not_exists => TRUE);")
+    cursor.execute("SELECT create_hypertable('events', 'ts', if_not_exists => TRUE);")
+    conn.commit()
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_vehicle_ts ON telemetry (vehicle_id, ts DESC);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_vehicle_ts ON events (vehicle_id, ts DESC);")
+    conn.commit()
+
+    print("[consumer] Hypertables/indexes ready ✅")
+except Exception as e:
+    # Si Timescale no está habilitado por alguna razón, igual seguimos con PostgreSQL normal.
+    print(f"[consumer] Timescale/hypertable setup skipped: {e}")
+
+# 5) Loop: leer stream del archivo e insertar
 with open(INPUT_PATH, "r", encoding="utf-8") as infile:
     infile.seek(0, 2)  # tail: leer solo nuevas líneas
 
@@ -65,7 +93,7 @@ with open(INPUT_PATH, "r", encoding="utf-8") as infile:
 
         data = json.loads(line)
 
-        # Insert a DB
+        # Insert telemetría
         cursor.execute("""
         INSERT INTO telemetry (ts, vehicle_id, speed_kmh, rpm, throttle_pct, brake_pct, steer_deg, g_lat, g_lon)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -80,9 +108,8 @@ with open(INPUT_PATH, "r", encoding="utf-8") as infile:
             data["g_lat"],
             data["g_lon"],
         ))
-        conn.commit()
 
-        # Event detection
+        # Detectar eventos
         events = []
         if data["brake_pct"] > 60:
             events.append("HARSH_BRAKE")
@@ -91,13 +118,18 @@ with open(INPUT_PATH, "r", encoding="utf-8") as infile:
         if data["speed_kmh"] > 120:
             events.append("OVERSPEED")
 
+        # Insert eventos (1 fila por evento)
         if events:
-            event_record = {
-                "ts": data["ts"],
-                "vehicle_id": data["vehicle_id"],
-                "events": events
-            }
-            print("[EVENT DETECTED]", event_record)
+            for ev in events:
+                cursor.execute("""
+                INSERT INTO events (ts, vehicle_id, event_type)
+                VALUES (%s, %s, %s)
+                """, (
+                    data["ts"],
+                    data["vehicle_id"],
+                    ev
+                ))
+            print("[EVENT DETECTED]", {"ts": data["ts"], "vehicle_id": data["vehicle_id"], "events": events})
 
-            with open(EVENTS_PATH, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event_record, ensure_ascii=False) + "\n")
+        # Commit una vez por ciclo
+        conn.commit()
