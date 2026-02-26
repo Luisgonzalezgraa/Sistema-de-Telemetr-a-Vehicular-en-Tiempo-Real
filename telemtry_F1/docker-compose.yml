@@ -1,0 +1,38 @@
+services:
+  simulator:
+    build: ./simulator
+    container_name: telemetry_simulator
+    environment:
+      VEHICLE_ID: "peugeot3008"
+      RATE_HZ: "1"
+      OUT_PATH: "/out/telemetry.jsonl"
+      SEED: "42"
+    volumes:
+      - ./data:/out
+    restart: unless-stopped
+
+  consumer:
+    build: ./consumer
+    container_name: telemetry_consumer
+    volumes:
+      - ./data:/out
+    depends_on:
+      - simulator
+      - db
+    restart: unless-stopped
+
+  db:
+    image: timescale/timescaledb:latest-pg14
+    container_name: telemetry_db
+    environment:
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: telemetry
+      POSTGRES_DB: telemetry
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  db_data:
