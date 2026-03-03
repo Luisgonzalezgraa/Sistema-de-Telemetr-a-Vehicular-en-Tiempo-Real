@@ -36,10 +36,41 @@ services:
       POSTGRES_PASSWORD: telemetry
       POSTGRES_DB: telemetry
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemetry -d telemetry"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
+  api:
+    build: ./api
+    container_name: telemetry_api
+    environment:
+      DB_HOST: db
+      DB_NAME: telemetry
+      DB_USER: telemetry
+      DB_PASS: telemetry
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  dashboard_next:
+    build: ./dashboard-next
+    container_name: telemetry_next
+    environment:
+      NEXT_PUBLIC_API_BASE: "http://api:8000"
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
 volumes:
   db_data:
+
+  
